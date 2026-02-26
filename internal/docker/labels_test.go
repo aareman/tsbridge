@@ -557,7 +557,7 @@ func TestParseServiceConfigBackendValidation(t *testing.T) {
 				Labels: tt.labels,
 			}
 
-			svc, err := provider.parseServiceConfig(container)
+			svc, err := provider.parseServiceConfig(container, make(map[string]string))
 			if tt.shouldError {
 				assert.Error(t, err)
 				if tt.errorMsg != "" {
@@ -652,7 +652,7 @@ func TestDockerInsecureSkipVerifyParsing(t *testing.T) {
 			},
 		}
 
-		svc, err := provider.parseServiceConfig(container)
+		svc, err := provider.parseServiceConfig(container, make(map[string]string))
 		require.NoError(t, err)
 
 		assert.NotNil(t, svc.InsecureSkipVerify)
@@ -670,7 +670,7 @@ func TestDockerInsecureSkipVerifyParsing(t *testing.T) {
 			},
 		}
 
-		svc, err := provider.parseServiceConfig(container)
+		svc, err := provider.parseServiceConfig(container, make(map[string]string))
 		require.NoError(t, err)
 
 		assert.NotNil(t, svc.InsecureSkipVerify)
@@ -687,7 +687,7 @@ func TestDockerInsecureSkipVerifyParsing(t *testing.T) {
 			},
 		}
 
-		svc, err := provider.parseServiceConfig(container)
+		svc, err := provider.parseServiceConfig(container, make(map[string]string))
 		require.NoError(t, err)
 
 		assert.Nil(t, svc.InsecureSkipVerify)
@@ -862,7 +862,7 @@ func TestParseServiceConfigPortDetection(t *testing.T) {
 				Ports:  tt.ports,
 			}
 
-			svc, err := provider.parseServiceConfig(c)
+			svc, err := provider.parseServiceConfig(c, make(map[string]string))
 			if tt.shouldError {
 				assert.Error(t, err)
 				if tt.errorMsg != "" {
@@ -971,7 +971,7 @@ func TestDockerServiceOAuthPreauthorizedParsing(t *testing.T) {
 				Labels: labels,
 			}
 
-			svc, err := provider.parseServiceConfig(container)
+			svc, err := provider.parseServiceConfig(container, make(map[string]string))
 			require.NoError(t, err)
 			require.NotNil(t, svc)
 
@@ -984,6 +984,234 @@ func TestDockerServiceOAuthPreauthorizedParsing(t *testing.T) {
 		})
 	}
 }
+// TestParseServiceConfigWithDefaultLabels tests parseServiceConfig with default labels
+func TestParseServiceConfigWithDefaultLabels(t *testing.T) {
+	provider := &Provider{
+		labelPrefix: "tsbridge",
+	}
+
+	tests := []struct {
+		name           string
+		labels         map[string]string
+		defaultLabels  map[string]string
+		expectedFields func(*config.Service) // Assertion function
+		shouldError    bool
+		errorMsg       string
+	}{
+		{
+			name: "default labels provide backend_addr when container lacks it",
+			labels: map[string]string{
+				"tsbridge.enabled": "true",
+			},
+			defaultLabels: map[string]string{
+				"tsbridge.service.backend_addr": "localhost:8080",
+			},
+			expectedFields: func(svc *config.Service) {
+				assert.Equal(t, "localhost:8080", svc.BackendAddr)
+			},
+			shouldError: false,
+		},
+		{
+			name: "container labels override default labels",
+			labels: map[string]string{
+				"tsbridge.enabled":              "true",
+				"tsbridge.service.backend_addr": "override:9000",
+			},
+			defaultLabels: map[string]string{
+				"tsbridge.service.backend_addr": "default:8080",
+			},
+			expectedFields: func(svc *config.Service) {
+				assert.Equal(t, "override:9000", svc.BackendAddr)
+			},
+			shouldError: false,
+		},
+		{
+			name: "default labels provide multiple properties",
+			labels: map[string]string{
+				"tsbridge.enabled": "true",
+				"tsbridge.service.backend_addr": "localhost:8080",
+			},
+			defaultLabels: map[string]string{
+				"tsbridge.service.whois_enabled": "true",
+				"tsbridge.service.access_log":    "false",
+				"tsbridge.service.tags":          "tag:default",
+			},
+			expectedFields: func(svc *config.Service) {
+				assert.Equal(t, "localhost:8080", svc.BackendAddr)
+				assert.NotNil(t, svc.WhoisEnabled)
+				assert.True(t, *svc.WhoisEnabled)
+				assert.NotNil(t, svc.AccessLog)
+				assert.False(t, *svc.AccessLog)
+				assert.Equal(t, []string{"tag:default"}, svc.Tags)
+			},
+			shouldError: false,
+		},
+		{
+			name: "container specific labels override defaults for multiple properties",
+			labels: map[string]string{
+				"tsbridge.enabled":           "true",
+				"tsbridge.service.tags":      "tag:prod,tag:web",
+				"tsbridge.service.access_log": "true",
+			},
+			defaultLabels: map[string]string{
+				"tsbridge.service.whois_enabled": "false",
+				"tsbridge.service.access_log":    "false",
+				"tsbridge.service.tags":          "tag:default",
+				"tsbridge.service.backend_addr": "localhost:8080",
+			},
+			expectedFields: func(svc *config.Service) {
+				assert.Equal(t, "localhost:8080", svc.BackendAddr)
+				assert.NotNil(t, svc.WhoisEnabled)
+				assert.False(t, *svc.WhoisEnabled)
+				assert.NotNil(t, svc.AccessLog)
+				assert.True(t, *svc.AccessLog)
+				assert.Equal(t, []string{"tag:prod", "tag:web"}, svc.Tags)
+			},
+			shouldError: false,
+		},
+		{
+			name: "default labels provide timeout settings",
+			labels: map[string]string{
+				"tsbridge.enabled":              "true",
+				"tsbridge.service.backend_addr": "localhost:8080",
+			},
+			defaultLabels: map[string]string{
+				"tsbridge.service.read_header_timeout": "30s",
+				"tsbridge.service.write_timeout":       "60s",
+				"tsbridge.service.idle_timeout":        "90s",
+			},
+			expectedFields: func(svc *config.Service) {
+				assert.Equal(t, "localhost:8080", svc.BackendAddr)
+				assert.NotNil(t, svc.ReadHeaderTimeout)
+				assert.Equal(t, 30*time.Second, *svc.ReadHeaderTimeout)
+				assert.NotNil(t, svc.WriteTimeout)
+				assert.Equal(t, 60*time.Second, *svc.WriteTimeout)
+				assert.NotNil(t, svc.IdleTimeout)
+				assert.Equal(t, 90*time.Second, *svc.IdleTimeout)
+			},
+			shouldError: false,
+		},
+		{
+			name: "container timeout overrides default timeout",
+			labels: map[string]string{
+				"tsbridge.enabled":                 "true",
+				"tsbridge.service.backend_addr":    "localhost:8080",
+				"tsbridge.service.write_timeout":   "120s",
+			},
+			defaultLabels: map[string]string{
+				"tsbridge.service.read_header_timeout": "30s",
+				"tsbridge.service.write_timeout":       "60s",
+			},
+			expectedFields: func(svc *config.Service) {
+				assert.NotNil(t, svc.WriteTimeout)
+				assert.Equal(t, 120*time.Second, *svc.WriteTimeout)
+				assert.NotNil(t, svc.ReadHeaderTimeout)
+				assert.Equal(t, 30*time.Second, *svc.ReadHeaderTimeout)
+			},
+			shouldError: false,
+		},
+		{
+			name: "default labels provide header configuration",
+			labels: map[string]string{
+				"tsbridge.enabled":              "true",
+				"tsbridge.service.backend_addr": "localhost:8080",
+			},
+			defaultLabels: map[string]string{
+				"tsbridge.service.upstream_headers.X-Default": "default-value",
+				"tsbridge.service.upstream_headers.Authorization": "Bearer token",
+			},
+			expectedFields: func(svc *config.Service) {
+				require.NotNil(t, svc.UpstreamHeaders)
+				assert.Equal(t, "default-value", svc.UpstreamHeaders["X-Default"])
+				assert.Equal(t, "Bearer token", svc.UpstreamHeaders["Authorization"])
+			},
+			shouldError: false,
+		},
+		{
+			name: "container headers override default headers",
+			labels: map[string]string{
+				"tsbridge.enabled":              "true",
+				"tsbridge.service.backend_addr": "localhost:8080",
+				"tsbridge.service.upstream_headers.X-Default": "override-value",
+			},
+			defaultLabels: map[string]string{
+				"tsbridge.service.upstream_headers.X-Default": "default-value",
+				"tsbridge.service.upstream_headers.X-Other": "other-value",
+			},
+			expectedFields: func(svc *config.Service) {
+				require.NotNil(t, svc.UpstreamHeaders)
+				assert.Equal(t, "override-value", svc.UpstreamHeaders["X-Default"])
+				assert.Equal(t, "other-value", svc.UpstreamHeaders["X-Other"])
+			},
+			shouldError: false,
+		},
+		{
+			name: "default labels provide remove_upstream and remove_downstream",
+			labels: map[string]string{
+				"tsbridge.enabled":              "true",
+				"tsbridge.service.backend_addr": "localhost:8080",
+			},
+			defaultLabels: map[string]string{
+				"tsbridge.service.remove_upstream":   "X-Forwarded-For,X-Real-IP",
+				"tsbridge.service.remove_downstream": "Server,Via",
+			},
+			expectedFields: func(svc *config.Service) {
+				assert.Equal(t, []string{"X-Forwarded-For", "X-Real-IP"}, svc.RemoveUpstream)
+				assert.Equal(t, []string{"Server", "Via"}, svc.RemoveDownstream)
+			},
+			shouldError: false,
+		},
+		{
+			name: "empty defaultLabels works correctly",
+			labels: map[string]string{
+				"tsbridge.enabled":              "true",
+				"tsbridge.service.backend_addr": "localhost:8080",
+				"tsbridge.service.whois_enabled": "true",
+			},
+			defaultLabels: map[string]string{},
+			expectedFields: func(svc *config.Service) {
+				assert.Equal(t, "localhost:8080", svc.BackendAddr)
+				assert.NotNil(t, svc.WhoisEnabled)
+				assert.True(t, *svc.WhoisEnabled)
+			},
+			shouldError: false,
+		},
+		{
+			name: "nil defaultLabels is handled (converted to empty map during merge)",
+			labels: map[string]string{
+				"tsbridge.enabled":              "true",
+				"tsbridge.service.backend_addr": "localhost:8080",
+			},
+			defaultLabels: nil,
+			expectedFields: func(svc *config.Service) {
+				assert.Equal(t, "localhost:8080", svc.BackendAddr)
+			},
+			shouldError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := container.Summary{
+				Names:  []string{"/test-container"},
+				Labels: tt.labels,
+			}
+
+			svc, err := provider.parseServiceConfig(container, tt.defaultLabels)
+			if tt.shouldError {
+				assert.Error(t, err)
+				if tt.errorMsg != "" {
+					assert.Contains(t, err.Error(), tt.errorMsg)
+				}
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, svc)
+				tt.expectedFields(svc)
+			}
+		})
+	}
+}
+
 func TestParseServiceNames(t *testing.T) {
 	provider := &Provider{
 		labelPrefix: "tsbridge",
@@ -1098,6 +1326,192 @@ func TestParseServiceNames(t *testing.T) {
 			sort.Strings(tt.expectedNames)
 
 			assert.Equal(t, tt.expectedNames, result)
+		})
+	}
+}
+
+// TestExtractServiceLabels tests the extractServiceLabels method
+func TestExtractServiceLabels(t *testing.T) {
+	provider := &Provider{
+		labelPrefix: "tsbridge",
+	}
+
+	tests := []struct {
+		name           string
+		labels         map[string]string
+		serviceName    string
+		expectedLabels map[string]string
+	}{
+		{
+			name: "extract single service property",
+			labels: map[string]string{
+				"tsbridge.service.nextcloud.port": "80",
+			},
+			serviceName: "nextcloud",
+			expectedLabels: map[string]string{
+				"tsbridge.service.port": "80",
+			},
+		},
+		{
+			name: "extract multiple service properties",
+			labels: map[string]string{
+				"tsbridge.service.nextcloud.port":              "80",
+				"tsbridge.service.nextcloud.backend_addr":      "localhost:8080",
+				"tsbridge.service.nextcloud.whois_enabled":     "true",
+				"tsbridge.service.nextcloud.access_log":        "false",
+				"tsbridge.service.nextcloud.read_header_timeout": "30s",
+			},
+			serviceName: "nextcloud",
+			expectedLabels: map[string]string{
+				"tsbridge.service.port":                  "80",
+				"tsbridge.service.backend_addr":          "localhost:8080",
+				"tsbridge.service.whois_enabled":         "true",
+				"tsbridge.service.access_log":            "false",
+				"tsbridge.service.read_header_timeout":   "30s",
+			},
+		},
+		{
+			name: "extract only matching service labels",
+			labels: map[string]string{
+				"tsbridge.service.nextcloud.port":  "80",
+				"tsbridge.service.nextcloud.tags":  "tag:prod",
+				"tsbridge.service.redis.port":      "6379",
+				"tsbridge.service.redis.tags":      "tag:cache",
+				"tsbridge.tailscale.state_dir":     "/var/lib/tsbridge",
+				"tsbridge.enabled":                 "true",
+			},
+			serviceName: "nextcloud",
+			expectedLabels: map[string]string{
+				"tsbridge.service.port": "80",
+				"tsbridge.service.tags": "tag:prod",
+			},
+		},
+		{
+			name: "extract service with complex names",
+			labels: map[string]string{
+				"tsbridge.service.my-web-app.port":     "8080",
+				"tsbridge.service.my-web-app.tags":     "tag:web",
+				"tsbridge.service.my_db_cache.port":    "6379",
+			},
+			serviceName: "my-web-app",
+			expectedLabels: map[string]string{
+				"tsbridge.service.port": "8080",
+				"tsbridge.service.tags": "tag:web",
+			},
+		},
+		{
+			name: "extract service with nested property names",
+			labels: map[string]string{
+				"tsbridge.service.app.upstream_headers.X-Custom": "value1",
+				"tsbridge.service.app.upstream_headers.X-Another": "value2",
+				"tsbridge.service.app.port": "8080",
+			},
+			serviceName: "app",
+			expectedLabels: map[string]string{
+				"tsbridge.service.upstream_headers.X-Custom":  "value1",
+				"tsbridge.service.upstream_headers.X-Another": "value2",
+				"tsbridge.service.port":                       "8080",
+			},
+		},
+		{
+			name:            "no matching labels returns empty map",
+			labels:          map[string]string{},
+			serviceName:     "nextcloud",
+			expectedLabels:  map[string]string{},
+		},
+		{
+			name: "service not found returns empty map",
+			labels: map[string]string{
+				"tsbridge.service.redis.port": "6379",
+				"tsbridge.service.redis.tags": "tag:cache",
+			},
+			serviceName:    "nextcloud",
+			expectedLabels: map[string]string{},
+		},
+		{
+			name: "ignores similar service names",
+			labels: map[string]string{
+				"tsbridge.service.nextcloud.port":     "80",
+				"tsbridge.service.nextcloud2.port":    "8080",
+				"tsbridge.service.next.port":          "9000",
+			},
+			serviceName: "nextcloud",
+			expectedLabels: map[string]string{
+				"tsbridge.service.port": "80",
+			},
+		},
+		{
+			name: "extract comma-separated values",
+			labels: map[string]string{
+				"tsbridge.service.app.tags":              "tag:prod,tag:web",
+				"tsbridge.service.app.remove_upstream":   "X-Forwarded-For,X-Real-IP",
+				"tsbridge.service.app.trusted_proxies":   "10.0.0.0/8,172.16.0.0/12",
+			},
+			serviceName: "app",
+			expectedLabels: map[string]string{
+				"tsbridge.service.tags":            "tag:prod,tag:web",
+				"tsbridge.service.remove_upstream": "X-Forwarded-For,X-Real-IP",
+				"tsbridge.service.trusted_proxies": "10.0.0.0/8,172.16.0.0/12",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := provider.extractServiceLabels(tt.labels, tt.serviceName)
+			assert.Equal(t, tt.expectedLabels, result)
+		})
+	}
+}
+
+// TestMergeLabels tests the mergeLabels helper function
+func TestMergeLabels(t *testing.T) {
+	tests := []struct {
+		name           string
+		defaults       map[string]string
+		target         map[string]string
+		expectedResult map[string]string
+	}{
+		{
+			name:     "empty defaults and target returns empty map",
+			defaults: map[string]string{},
+			target:   map[string]string{},
+			expectedResult: map[string]string{},
+		},
+		{
+			name:     "only defaults returns defaults",
+			defaults: map[string]string{"tsbridge.service.port": "80"},
+			target:   map[string]string{},
+			expectedResult: map[string]string{"tsbridge.service.port": "80"},
+		},
+		{
+			name:     "only target returns target",
+			defaults: map[string]string{},
+			target:   map[string]string{"tsbridge.service.port": "8080"},
+			expectedResult: map[string]string{"tsbridge.service.port": "8080"},
+		},
+		{
+			name:     "target overrides defaults",
+			defaults: map[string]string{"tsbridge.service.port": "80", "tsbridge.service.tags": "tag:default"},
+			target:   map[string]string{"tsbridge.service.tags": "tag:override"},
+			expectedResult: map[string]string{"tsbridge.service.port": "80", "tsbridge.service.tags": "tag:override"},
+		},
+		{
+			name:     "multiple properties merged correctly",
+			defaults: map[string]string{"tsbridge.service.port": "80", "tsbridge.service.whois_enabled": "true"},
+			target:   map[string]string{"tsbridge.service.tags": "tag:prod", "tsbridge.service.whois_enabled": "false"},
+			expectedResult: map[string]string{
+				"tsbridge.service.port":          "80",
+				"tsbridge.service.whois_enabled": "false",
+				"tsbridge.service.tags":          "tag:prod",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := mergeLabels(tt.defaults, tt.target)
+			assert.Equal(t, tt.expectedResult, result)
 		})
 	}
 }

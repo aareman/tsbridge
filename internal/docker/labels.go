@@ -188,8 +188,9 @@ func (p *Provider) parseGlobalConfig(container *container.Summary, cfg *config.C
 }
 
 // parseServiceConfig parses service configuration from container labels
-func (p *Provider) parseServiceConfig(container container.Summary) (*config.Service, error) {
-	parser := newLabelParser(container.Labels, p.labelPrefix)
+func (p *Provider) parseServiceConfig(container container.Summary, defaultLabels map[string]string) (*config.Service, error) {
+	mergedLabels := mergeLabels(defaultLabels, container.Labels)
+	parser := newLabelParser(mergedLabels, p.labelPrefix)
 	svc := &config.Service{}
 
 	// Service name (required)
@@ -224,7 +225,7 @@ func (p *Provider) parseServiceConfig(container container.Summary) (*config.Serv
 				port = fmt.Sprintf("%d", exposedPorts[0])
 			default:
 				return nil, errors.NewProviderError("docker", errors.ErrTypeValidation,
-					fmt.Sprintf("container exposes multiple ports %v; specify tsbridge.service.port or tsbridge.service.backend_addr", exposedPorts))
+					fmt.Sprintf("container exposes multiple ports %v; add tsbridge.service.port label to select one", exposedPorts))
 			}
 		}
 
@@ -389,6 +390,54 @@ func (p *Provider) parseServiceNames(labels map[string]string) []string {
 	result := make([]string, 0, len(serviceNames))
 	for name := range serviceNames {
 		result = append(result, name)
+	}
+
+	return result
+}
+
+// extractServiceLabels translates service-specific labels from {prefix}.service.{name}.{property}
+// format to {prefix}.service.{property} format for a given service name.
+// For example: tsbridge.service.nextcloud.port=80 → tsbridge.service.port=80
+// Returns a map[string]string ready for use with labelParser.
+// Returns empty map if no matching labels found for the service.
+func (p *Provider) extractServiceLabels(labels map[string]string, serviceName string) map[string]string {
+	// Build the source prefix pattern: {prefix}.service.{serviceName}.
+	sourcePrefix := fmt.Sprintf("%s.service.%s.", p.labelPrefix, serviceName)
+	targetPrefix := fmt.Sprintf("%s.service.", p.labelPrefix)
+
+	result := make(map[string]string)
+
+	// Iterate through all labels
+	for labelKey, value := range labels {
+		// Check if the label starts with {prefix}.service.{serviceName}.
+		if strings.HasPrefix(labelKey, sourcePrefix) {
+			// Extract the property name (part after {prefix}.service.{serviceName}.)
+			property := strings.TrimPrefix(labelKey, sourcePrefix)
+			if property != "" {
+				// Create the flattened label key
+				flattenedKey := targetPrefix + property
+				result[flattenedKey] = value
+			}
+		}
+	}
+
+	return result
+}
+
+// mergeLabels combines default labels with target labels, where target labels take precedence.
+// This is used when merging defaults extracted from the tsbridge container with labels
+// from the discovered service container. Target labels override defaults on conflict.
+func mergeLabels(defaults, target map[string]string) map[string]string {
+	result := make(map[string]string)
+
+	// First, copy all default labels
+	for key, value := range defaults {
+		result[key] = value
+	}
+
+	// Then, apply target labels (overriding defaults)
+	for key, value := range target {
+		result[key] = value
 	}
 
 	return result

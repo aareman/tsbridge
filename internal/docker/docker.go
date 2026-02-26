@@ -44,9 +44,10 @@ type Provider struct {
 	pollInterval  time.Duration
 	mu            sync.RWMutex
 	lastConfig    *config.Config
-	debounceTimer *time.Timer
-	debounceMu    sync.Mutex
-	pollTicker    *time.Ticker
+	debounceTimer   *time.Timer
+	debounceMu      sync.Mutex
+	pollTicker      *time.Ticker
+	cachedTailscale *config.Tailscale
 }
 
 // Options contains configuration options for the Docker provider
@@ -191,7 +192,16 @@ func (p *Provider) Load(ctx context.Context) (*config.Config, error) {
 		slog.Debug("found containers from tsbridge labels", "count", len(labelContainers))
 	}
 
-// Find all containers with tsbridge.enabled=true (traditional discovery)
+	// Reuse cached Tailscale config on subsequent loads. The initial
+	// config resolution clears auth key env vars (TS_AUTHKEY) to prevent
+	// the tsnet library from independently reading them. Without this
+	// cache, subsequent Load() calls would fail to re-resolve the auth
+	// key from the now-cleared env vars.
+	if p.cachedTailscale != nil {
+		cfg.Tailscale = *p.cachedTailscale
+	}
+
+	// Find all containers with tsbridge.enabled=true (traditional discovery)
 	serviceContainers, err := p.findServiceContainers(ctx)
 	if err != nil {
 		return nil, errors.WrapProviderError(err, "docker", errors.ErrTypeResource, "finding service containers")
@@ -208,7 +218,11 @@ func (p *Provider) Load(ctx context.Context) (*config.Config, error) {
 			containerName = container.Names[0]
 		}
 
-		svc, err := p.parseServiceConfig(container)
+		// Extract service-specific labels from tsbridge container for this service
+		serviceName := strings.TrimPrefix(containerName, "/")
+		defaultServiceLabels := p.extractServiceLabels(selfContainer.Labels, serviceName)
+
+		svc, err := p.parseServiceConfig(container, defaultServiceLabels)
 		if err != nil {
 			slog.Warn("failed to parse service configuration",
 				"container", containerName,
@@ -226,7 +240,11 @@ func (p *Provider) Load(ctx context.Context) (*config.Config, error) {
 			containerName = container.Names[0]
 		}
 
-		svc, err := p.parseServiceConfig(container)
+		// Extract service-specific labels from tsbridge container for this service
+		serviceName := strings.TrimPrefix(containerName, "/")
+		defaultServiceLabels := p.extractServiceLabels(selfContainer.Labels, serviceName)
+
+		svc, err := p.parseServiceConfig(container, defaultServiceLabels)
 		if err != nil {
 			slog.Warn("failed to parse service configuration",
 				"container", containerName,
@@ -258,6 +276,14 @@ func (p *Provider) Load(ctx context.Context) (*config.Config, error) {
 		"label_prefix", p.labelPrefix)
 
 	p.lastConfig = cfg
+
+	// Cache the Tailscale config after successful load so subsequent
+	// Load() calls can reuse it (auth key env vars get cleared on first use).
+	if p.cachedTailscale == nil {
+		ts := cfg.Tailscale
+		p.cachedTailscale = &ts
+	}
+
 	return cfg, nil
 }
 
@@ -649,7 +675,7 @@ func (p *Provider) findServiceContainers(ctx context.Context) ([]container.Summa
 	return serviceContainers, nil
 }
 
- 
+
 // findContainersByNames finds containers matching any of the given service names.
 // It queries all running containers and matches against their Names field.
 // Unlike findServiceContainers, this does NOT require tsbridge.enabled=true.

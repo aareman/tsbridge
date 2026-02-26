@@ -179,7 +179,7 @@ func TestParseServiceConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, err := provider.parseServiceConfig(tt.container)
+			svc, err := provider.parseServiceConfig(tt.container, make(map[string]string))
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -523,7 +523,7 @@ func TestDockerLabelParsingErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := provider.parseServiceConfig(tt.container)
+			_, err := provider.parseServiceConfig(tt.container, make(map[string]string))
 
 			if tt.wantErr {
 				if err == nil {
@@ -2766,7 +2766,7 @@ func TestProvider_findContainersByNames(t *testing.T) {
 			name:         "empty service names slice",
 			serviceNames: []string{},
 			containers: []container.Summary{
-				{ID: "c1", Names: []string{"/nextcloud"}},
+				{ID: "c1", State: "running", Names: []string{"/nextcloud"}},
 			},
 			wantErr:   false,
 			wantCount: 0,
@@ -2775,7 +2775,7 @@ func TestProvider_findContainersByNames(t *testing.T) {
 			name:         "nil service names",
 			serviceNames: nil,
 			containers: []container.Summary{
-				{ID: "c1", Names: []string{"/nextcloud"}},
+				{ID: "c1", State: "running", Names: []string{"/nextcloud"}},
 			},
 			wantErr:   false,
 			wantCount: 0,
@@ -2784,8 +2784,8 @@ func TestProvider_findContainersByNames(t *testing.T) {
 			name:         "no matching containers",
 			serviceNames: []string{"nextcloud", "redis"},
 			containers: []container.Summary{
-				{ID: "c1", Names: []string{"/other"}},
-				{ID: "c2", Names: []string{"/nginx"}},
+				{ID: "c1", State: "running", Names: []string{"/other"}},
+				{ID: "c2", State: "running", Names: []string{"/nginx"}},
 			},
 			wantErr:   false,
 			wantCount: 0,
@@ -2794,8 +2794,8 @@ func TestProvider_findContainersByNames(t *testing.T) {
 			name:         "single matching container",
 			serviceNames: []string{"nextcloud"},
 			containers: []container.Summary{
-				{ID: "c1", Names: []string{"/nextcloud"}},
-				{ID: "c2", Names: []string{"/other"}},
+				{ID: "c1", State: "running", Names: []string{"/nextcloud"}},
+				{ID: "c2", State: "running", Names: []string{"/other"}},
 			},
 			wantErr:   false,
 			wantCount: 1,
@@ -2805,9 +2805,9 @@ func TestProvider_findContainersByNames(t *testing.T) {
 			name:         "multiple matching containers",
 			serviceNames: []string{"nextcloud", "redis"},
 			containers: []container.Summary{
-				{ID: "c1", Names: []string{"/nextcloud"}},
-				{ID: "c2", Names: []string{"/redis"}},
-				{ID: "c3", Names: []string{"/nginx"}},
+				{ID: "c1", State: "running", Names: []string{"/nextcloud"}},
+				{ID: "c2", State: "running", Names: []string{"/redis"}},
+				{ID: "c3", State: "running", Names: []string{"/nginx"}},
 			},
 			wantErr:   false,
 			wantCount: 2,
@@ -2816,7 +2816,7 @@ func TestProvider_findContainersByNames(t *testing.T) {
 			name:         "container name with leading slash",
 			serviceNames: []string{"nextcloud"},
 			containers: []container.Summary{
-				{ID: "c1", Names: []string{"/nextcloud"}}, // Has leading slash
+				{ID: "c1", State: "running", Names: []string{"/nextcloud"}}, // Has leading slash
 			},
 			wantErr:   false,
 			wantCount: 1,
@@ -2826,7 +2826,7 @@ func TestProvider_findContainersByNames(t *testing.T) {
 			name:         "container without leading slash in input",
 			serviceNames: []string{"nextcloud"},
 			containers: []container.Summary{
-				{ID: "c1", Names: []string{"nextcloud"}}, // No leading slash (edge case)
+				{ID: "c1", State: "running", Names: []string{"nextcloud"}}, // No leading slash (edge case)
 			},
 			wantErr:   false,
 			wantCount: 1,
@@ -2836,7 +2836,7 @@ func TestProvider_findContainersByNames(t *testing.T) {
 			name:         "container with multiple names - first matches",
 			serviceNames: []string{"nextcloud"},
 			containers: []container.Summary{
-				{ID: "c1", Names: []string{"/nextcloud", "/nc-alias"}},
+				{ID: "c1", State: "running", Names: []string{"/nextcloud", "/nc-alias"}},
 			},
 			wantErr:   false,
 			wantCount: 1,
@@ -2852,8 +2852,8 @@ func TestProvider_findContainersByNames(t *testing.T) {
 			name:         "service name not in list returns empty",
 			serviceNames: []string{"mysql", "postgres"},
 			containers: []container.Summary{
-				{ID: "c1", Names: []string{"/redis"}},
-				{ID: "c2", Names: []string{"/mongo"}},
+				{ID: "c1", State: "running", Names: []string{"/redis"}},
+				{ID: "c2", State: "running", Names: []string{"/mongo"}},
 			},
 			wantErr:   false,
 			wantCount: 0,
@@ -2903,5 +2903,187 @@ func TestProvider_findContainersByNames_Error(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "docker API error")
+}
+
+// TestProvider_Load_NextcloudAIOScenario tests the exact Nextcloud AIO bug scenario:
+// - tsbridge container has service labels: tsbridge.service.nextcloud-aio-apache.port=80
+// - nextcloud container has multiple ports exposed
+// - service should get port from tsbridge defaults
+func TestProvider_Load_NextcloudAIOScenario(t *testing.T) {
+	mockClient := newMockDockerClient()
+
+	// Create tsbridge container with service definition for nextcloud
+	tsbridgeContainer := container.Summary{
+		ID:    "tsbridge123",
+		Names: []string{"/tsbridge"},
+		State: "running",
+		Labels: map[string]string{
+			"tsbridge.tailscale.oauth_client_id":         "tskey-123", // Required for findSelfContainer
+			"tsbridge.tailscale.oauth_client_secret":     "secret-456", // Hardcoded secret for test
+			"tsbridge.tailscale.default_tags":            "tag:test", // Required for OAuth services
+			"tsbridge.tailscale.state_dir":               "/var/lib/tsbridge",
+			"tsbridge.service.nextcloud-aio-apache.port": "80", // Service default for nextcloud
+		},
+	}
+
+	// Create nextcloud container with multiple ports (simulates Nextcloud AIO)
+	// This container has NO tsbridge.enabled label - it's discovered via tsbridge service labels
+	nextcloudContainer := container.Summary{
+		ID:    "nextcloud-aio-123",
+		Names: []string{"/nextcloud-aio-apache"},
+		State: "running",
+		Labels: map[string]string{
+			// NO tsbridge labels here
+		},
+		Ports: []container.Port{
+			{PrivatePort: 443, PublicPort: 0},
+			{PrivatePort: 80, PublicPort: 0}, // Should pick this one from tsbridge default
+			{PrivatePort: 9000, PublicPort: 0},
+		},
+	}
+
+	mockClient.containers = []container.Summary{tsbridgeContainer, nextcloudContainer}
+
+	provider := &Provider{
+		client:      mockClient,
+		labelPrefix: "tsbridge",
+	}
+
+	ctx := context.Background()
+	cfg, err := provider.Load(ctx)
+
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	// Should have one service: nextcloud
+	assert.Len(t, cfg.Services, 1, "Should have one service from tsbridge container labels")
+
+	service := cfg.Services[0]
+	assert.Equal(t, "nextcloud-aio-apache", service.Name, "Service name should match container name")
+	assert.Contains(t, service.BackendAddr, ":80", "Backend address should use port from tsbridge defaults")
+	assert.Contains(t, service.BackendAddr, "nextcloud-aio-apache", "Backend address should use container name")
+}
+
+// TestProvider_Load_NextcloudAIOScenario_WithTraditionalDiscoveryPrecedence tests that
+// traditional discovery (tsbridge.enabled=true) takes precedence over label-based discovery
+func TestProvider_Load_NextcloudAIOScenario_WithTraditionalDiscoveryPrecedence(t *testing.T) {
+	mockClient := newMockDockerClient()
+
+	// Create tsbridge container with service definition for nextcloud
+	tsbridgeContainer := container.Summary{
+		ID:    "tsbridge123",
+		Names: []string{"/tsbridge"},
+		State: "running",
+		Labels: map[string]string{
+			"tsbridge.tailscale.oauth_client_id":         "tskey-123", // Required for findSelfContainer
+			"tsbridge.tailscale.oauth_client_secret":     "secret-456", // Hardcoded secret for test
+			"tsbridge.tailscale.default_tags":            "tag:test", // Required for OAuth services
+			"tsbridge.service.nextcloud.port":            "80",   // Default: port 80
+			"tsbridge.service.nextcloud.access_log":      "true", // Default: access log on
+		},
+	}
+
+	// Create nextcloud container with BOTH traditional labels AND matching name
+	nextcloudContainer := container.Summary{
+		ID:    "nextcloud-123",
+		Names: []string{"/nextcloud"},
+		State: "running",
+		Labels: map[string]string{
+			"tsbridge.enabled":           "true",
+			"tsbridge.service.port":      "443",   // Override: port 443
+			"tsbridge.service.access_log": "false", // Override: access log off
+		},
+		Ports: []container.Port{
+			{PrivatePort: 443, PublicPort: 0},
+			{PrivatePort: 80, PublicPort: 0},
+		},
+	}
+
+	mockClient.containers = []container.Summary{tsbridgeContainer, nextcloudContainer}
+
+	provider := &Provider{
+		client:      mockClient,
+		labelPrefix: "tsbridge",
+	}
+
+	ctx := context.Background()
+	cfg, err := provider.Load(ctx)
+
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	// Should have one service (traditional takes precedence, no duplicate)
+	assert.Len(t, cfg.Services, 1, "Should have one service (traditional discovery takes precedence)")
+
+	service := cfg.Services[0]
+	assert.Equal(t, "nextcloud", service.Name)
+	// Container labels should override tsbridge defaults
+	assert.Contains(t, service.BackendAddr, ":443", "Container labels should override tsbridge defaults for port")
+	assert.False(t, *service.AccessLog, "Container labels should override tsbridge defaults for access_log")
+}
+
+// TestProvider_Load_NextcloudAIOScenario_MultipleServices tests multiple service definitions
+// on the tsbridge container for different containers
+func TestProvider_Load_NextcloudAIOScenario_MultipleServices(t *testing.T) {
+	mockClient := newMockDockerClient()
+
+	// Create tsbridge container with service definitions for multiple containers
+	tsbridgeContainer := container.Summary{
+		ID:    "tsbridge123",
+		Names: []string{"/tsbridge"},
+		State: "running",
+		Labels: map[string]string{
+			"tsbridge.tailscale.oauth_client_id":         "tskey-123", // Required for findSelfContainer
+			"tsbridge.tailscale.oauth_client_secret":     "secret-456", // Hardcoded secret for test
+			"tsbridge.tailscale.default_tags":            "tag:test", // Required for OAuth services
+			"tsbridge.service.nextcloud.port":            "80",
+			"tsbridge.service.redis.port":                "6379",
+		},
+	}
+
+	// Create nextcloud container
+	nextcloudContainer := container.Summary{
+		ID:    "nextcloud-123",
+		Names: []string{"/nextcloud"},
+		State: "running",
+		Ports: []container.Port{
+			{PrivatePort: 80, PublicPort: 0},
+		},
+	}
+
+	// Create redis container
+	redisContainer := container.Summary{
+		ID:    "redis-123",
+		Names: []string{"/redis"},
+		State: "running",
+		Ports: []container.Port{
+			{PrivatePort: 6379, PublicPort: 0},
+		},
+	}
+
+	mockClient.containers = []container.Summary{tsbridgeContainer, nextcloudContainer, redisContainer}
+
+	provider := &Provider{
+		client:      mockClient,
+		labelPrefix: "tsbridge",
+	}
+
+	ctx := context.Background()
+	cfg, err := provider.Load(ctx)
+
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	// Should have two services
+	assert.Len(t, cfg.Services, 2, "Should have two services from tsbridge container labels")
+
+	// Check services
+	serviceNames := make(map[string]string)
+	for _, svc := range cfg.Services {
+		serviceNames[svc.Name] = svc.BackendAddr
+	}
+
+	assert.Contains(t, serviceNames["nextcloud"], ":80", "Nextcloud should use port from tsbridge defaults")
+	assert.Contains(t, serviceNames["redis"], ":6379", "Redis should use port from tsbridge defaults")
 }
 

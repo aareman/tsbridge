@@ -160,7 +160,7 @@ services:
       - "tsbridge.tailscale.oauth_client_id_env=TS_OAUTH_CLIENT_ID"
       - "tsbridge.tailscale.oauth_client_secret_env=TS_OAUTH_CLIENT_SECRET"
       - "tsbridge.tailscale.state_dir=/var/lib/tsbridge"
-      # Service definitions (NEW FEATURE)
+      # Service definitions
       - "tsbridge.service.nextcloud.port=80"
       - "tsbridge.service.redis.port=6379"
 
